@@ -93,6 +93,7 @@ def main():
     n_ar = np.arange(args.num_envs)
     prev_alive = env.alive.copy()
     agree_ema = 0.5
+    pending_kcs = None
 
     with open(out / "distill.csv", "w", newline="") as f:
         w = csv.writer(f)
@@ -117,7 +118,7 @@ def main():
                 next_eval += args.eval_every
 
             ta, _, _ = teacher.act(obs, 0.0)             # teacher flies
-            sa, q, kc_cache = student.act(obs, 0.0)      # student predicts
+            sa, q, kc_cache = student.act(obs, 0.0, kcs=pending_kcs)
             agree = (ta == sa)
             agree_ema += 0.001 * (float(agree.mean()) - agree_ema)
 
@@ -125,12 +126,15 @@ def main():
             rewards = rewards + np.where(agree, args.agree, -args.agree)
 
             newly_dead = prev_alive & ~env.alive
-            q_next = student.values(next_obs).max(axis=1)
+            pending_kcs = student.kc_all_actions(next_obs)
+            q_next = student._q_from_kc(pending_kcs).max(axis=1)
             student.learn(ta, kc_cache, rewards, q[n_ar, ta], q_next,
                           dones=newly_dead, alive=prev_alive)
             prev_alive = env.alive.copy()
             obs = next_obs if not done else env.reset()
             prev_alive = env.alive.copy() if done else prev_alive
+            if done:
+                pending_kcs = None
 
     ev = greedy_eval(student, env, args.eval_episodes, seed=99)
     print("final:", ev, flush=True)

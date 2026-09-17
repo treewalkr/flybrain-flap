@@ -128,6 +128,7 @@ class RealMB:
         self.eta = 0.0
         self.calibrated = False
         self._trace: np.ndarray | None = None  # per-bird KC eligibility traces
+        self._kc_fast: tuple | None = None     # candidate-path precomputation
 
     # ---------------------------------------------------------------- sensory
     def encode(self, obs: np.ndarray) -> np.ndarray:
@@ -148,18 +149,67 @@ class RealMB:
         """(B, n_pn) -> (B, n_kc) coincidence drive: min over each KC's real
         PN inputs (soft-AND); KCs without input get -1e9.
 
-        Chunked over batch rows: reduceat over all 22.6k edges at once for
-        4096 calibration rows would need ~400 MB of scratch."""
+        Fast path: a KC whose PNs include any exactly-zero PN gets input
+        0 + bias, so only "candidate" KCs (every PN input active) need a
+        real min. This is bit-exact: min over the same edges in the same
+        order, and 0.0 + bias == bias exactly in float32."""
         b = pn_act.shape[0]
-        out = np.empty((b, self.n_kc), dtype=np.float32)
-        row_slice = 256
-        for lo in range(0, b, row_slice):
-            hi = min(b, lo + row_slice)
-            edge_vals = pn_act[lo:hi, self.edge_pre]  # (rows, n_edges)
-            mins = np.minimum.reduceat(edge_vals, self.kc_group_start, axis=1)
-            out[lo:hi, self.kc_group_kc] = mins
-        out[:, ~self.kc_has_input] = -1e9
-        return out + self.kc_bias
+        bias = self.kc_bias
+        h = np.empty((b, self.n_kc), dtype=np.float32)
+        h[:] = bias                      # zero-min KCs: 0 + bias == bias exactly
+        h[:, ~self.kc_has_input] = (-1e9 + bias)[~self.kc_has_input]
+        if self._kc_fast is None:
+            self._build_kc_fast()
+        (csr_flat, csr_start, deg, edge_lo, edge_w, has_input) = self._kc_fast
+        n_kc = self.n_kc
+        for r in range(b):
+            active = np.flatnonzero(pn_act[r] > 0)
+            # ragged concat of the active PNs' KC-neighbour lists (multiplicity)
+            lens = csr_start[active + 1] - csr_start[active]
+            tot = int(lens.sum())
+            if tot == 0:
+                continue
+            out = np.empty(tot, dtype=np.int32)
+            pos = np.concatenate(([0], np.cumsum(lens[:-1])))
+            reps = np.repeat(csr_start[active] - pos, lens) + np.arange(tot)
+            out[:] = csr_flat[reps]
+            cnt = np.bincount(out, minlength=n_kc)
+            cand = np.flatnonzero((cnt == deg) & has_input)
+            if cand.size == 0:
+                continue
+            lo, w = edge_lo[cand], edge_w[cand]
+            tot_e = int(w.sum())
+            esel = np.empty(tot_e, dtype=np.int64)
+            pos_e = np.concatenate(([0], np.cumsum(w[:-1])))
+            esel[:] = np.repeat(lo - pos_e, w) + np.arange(tot_e)
+            vals = pn_act[r, self.edge_pre[esel]]
+            bounds = np.concatenate(([0], np.cumsum(w[:-1])))
+            h[r, cand] = np.minimum.reduceat(vals, bounds) + bias[cand]
+        return h
+
+    def _build_kc_fast(self) -> None:
+        """Precompute PN->KC incidence (CSR with multiplicity) and per-KC edge
+        blocks for the candidate-only fast path in _kc_input."""
+        gk, gs, edge_pre = self.kc_group_kc, self.kc_group_start, self.edge_pre
+        widths_g = np.diff(np.append(gs, edge_pre.size))
+        edge_kc = np.repeat(gk, widths_g)                     # KC per edge
+        n_pn, n_kc = self.n_pn, self.n_kc
+        inc = np.zeros((n_pn, n_kc), dtype=np.int32)
+        np.add.at(inc, (edge_pre, edge_kc), 1)
+        deg = inc.sum(0)
+        # CSR: for each PN, its KC neighbours (repeated per edge)
+        counts = inc.sum(1)
+        csr_start = np.zeros(n_pn + 1, dtype=np.int64)
+        np.cumsum(counts, out=csr_start[1:])
+        order = np.lexsort((edge_kc, edge_pre))              # group by PN
+        csr_flat = edge_kc[order].astype(np.int32)
+        # per-KC edge block in the edge list (KC id -> [lo, lo+w)); -1 if none
+        edge_lo = np.full(n_kc, -1, dtype=np.int64)
+        edge_w = np.zeros(n_kc, dtype=np.int64)
+        edge_lo[gk] = gs
+        edge_w[gk] = widths_g
+        self._kc_fast = (csr_flat, csr_start, deg, edge_lo, edge_w,
+                         self.kc_has_input)
 
     def kc_code(self, features: np.ndarray, codes: np.ndarray) -> np.ndarray:
         """(B, F) features + (B, A_dims) action codes -> (B, n_kc) bool top-k code."""
@@ -185,20 +235,24 @@ class RealMB:
     def _q_from_kc(self, kc: np.ndarray) -> np.ndarray:
         return self.drives(kc) @ self.readout
 
-    def values(self, obs: np.ndarray) -> np.ndarray:
-        """Values for all actions. obs: (N, F). Returns (N, 2)."""
-        return self._q_from_kc(self.kc_all_actions(obs))
+    def values(self, obs: np.ndarray, kcs: np.ndarray | None = None) -> np.ndarray:
+        """Values for all actions. obs: (N, F). Returns (N, 2).
+        kcs: precomputed (N, 2, n_kc) codes from kc_all_actions (skips the
+        forward pass when the caller already computed them for this obs)."""
+        return self._q_from_kc(self.kc_all_actions(obs) if kcs is None else kcs)
 
     def act(
         self,
         obs: np.ndarray,
         epsilon: float,
         explore_probs: np.ndarray | None = None,
+        kcs: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
         """Same contract as MushroomBody.act: actions (N,), q (N, 2),
-        kc_cache[a] = (N, n_kc) bool code for action a."""
+        kc_cache[a] = (N, n_kc) bool code for action a.
+        kcs: precomputed (N, 2, n_kc) codes for this obs, if already done."""
         n = obs.shape[0]
-        kcs = self.kc_all_actions(obs)
+        kcs = self.kc_all_actions(obs) if kcs is None else kcs
         kc_cache = [kcs[:, 0], kcs[:, 1]]
         q = np.stack([self._q_from_kc(kc_cache[0]), self._q_from_kc(kc_cache[1])], axis=1)
 

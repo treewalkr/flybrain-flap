@@ -94,6 +94,28 @@ def test_eligibility_trace_gives_delayed_credit():
     assert results[0.9] > results[0.0] * 3 + 1e-4, results
 
 
+def test_kc_input_fast_path_exact():
+    """The candidate-only fast path in _kc_input must be bit-identical to a
+    plain min-reduceat over all edges (drives, codes and all)."""
+    b = RealMB(tiny_circuit(seed=5), RealMBConfig(kc_active=30, seed=7))
+    rng = np.random.default_rng(11)
+    feats = rng.uniform(-1, 1, (128, 5)).astype(np.float32)
+    b.calibrate(b.encode(feats))
+
+    def slow(pn_act):
+        out = np.empty((pn_act.shape[0], b.n_kc), np.float32)
+        edge_vals = pn_act[:, b.edge_pre]
+        out[:, b.kc_group_kc] = np.minimum.reduceat(edge_vals, b.kc_group_start, axis=1)
+        out[:, ~b.kc_has_input] = -1e9
+        return out + b.kc_bias
+
+    enc = b.encode(feats)
+    fa = np.repeat(enc[:, None, :], 2, 1).reshape(-1, b.n_sensory)
+    ca = np.repeat(b.action_codes[None], 128, 0).reshape(-1, 2)
+    pn = b._pn(fa, ca)
+    np.testing.assert_array_equal(b._kc_input(pn), slow(pn))
+
+
 def test_save_load_roundtrip(tmp_path):
     b = RealMB(tiny_circuit(seed=2), RealMBConfig(kc_active=40, seed=9))
     feats = np.random.default_rng(1).uniform(-1, 1, (64, 5)).astype(np.float32)

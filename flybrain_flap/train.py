@@ -80,6 +80,7 @@ def main():
     episode_pipes: list[float] = []
     trace: list[int] = []  # actions of env 0 in its current episode
     prev_alive = env.alive.copy()
+    pending_kcs: np.ndarray | None = None  # next obs's codes (None after reset)
 
     with open(out / "train.csv", "w", newline="") as f:
         writer = csv.writer(f)
@@ -88,15 +89,18 @@ def main():
         ])
 
         while (time.time() - t0) / 60.0 < args.minutes:
-            actions, q, kc_cache = brain.act(obs, eps, explore_probs=explore_probs)
+            actions, q, kc_cache = brain.act(obs, eps, explore_probs=explore_probs,
+                                            kcs=pending_kcs)
             trace.append(int(actions[0]))
             next_obs, rewards, done = env.step(actions)
 
             newly_dead = prev_alive & ~env.alive
             episode_pipes.extend(env.pipes_passed[newly_dead].tolist())
 
-            # greedy bootstrap value of the next state (0 for agents that died)
-            q_next = brain.values(next_obs).max(axis=1)
+            # greedy bootstrap value of the next state (0 for agents that died):
+            # compute the next obs's KC codes once, reused by the next act()
+            pending_kcs = brain.kc_all_actions(next_obs)
+            q_next = brain._q_from_kc(pending_kcs).max(axis=1)
             ar = np.arange(args.num_envs)
             brain.learn(
                 actions, kc_cache, rewards, q[ar, actions], q_next,
@@ -113,6 +117,7 @@ def main():
                 trace = []
                 obs = env.reset()
                 prev_alive = env.alive.copy()
+                pending_kcs = None  # fresh states: codes not yet computed
 
             elapsed = (time.time() - t0) / 60.0
             if elapsed >= next_report:
