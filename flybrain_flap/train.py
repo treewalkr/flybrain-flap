@@ -34,6 +34,8 @@ def parse_args():
     p.add_argument("--circuit", type=str, default=None,
                    help="path to circuit.npz: use the real MaleCNS-connectome "
                         "brain (RealMB) instead of the abstract one")
+    p.add_argument("--shaping", type=float, default=0.05,
+                   help="gap-alignment shaping reward per step")
     p.add_argument("--alpha", type=float, default=0.02,
                    help="RealMB only: target dV per unit RPE")
     p.add_argument("--overlap", type=float, default=0.5,
@@ -46,7 +48,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    env = FlappyEnv(args.num_envs, seed=args.seed)
+    env = FlappyEnv(args.num_envs, seed=args.seed, shaping=args.shaping)
     if args.circuit:
         from .connectome import load as load_circuit
         from .realbrain import RealMB, RealMBConfig, calibrate_from_env

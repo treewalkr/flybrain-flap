@@ -81,16 +81,17 @@ class SkeletonCloud:
         print(f"skeleton cloud: {len(self.points):,} points, {base} neurons")
 
 
-def population_activity(brain, obs, rpe) -> dict[str, np.ndarray]:
-    """One frame of per-neuron activity in [0, 1] for a single-bird obs."""
+def population_activity(brain, obs, rpe, kcs=None) -> dict[str, np.ndarray]:
+    """One frame of per-neuron activity in [0, 1] for a single-bird obs.
+    kcs: precomputed (1, 2, n_kc) codes from brain.kc_all_actions (optional)."""
     o = np.asarray(obs, dtype=np.float32).reshape(1, -1)
     pn = brain._pn(brain.encode(o), np.zeros((1, 2), np.float32))[0]
     pn = pn / max(pn.max(), 1e-9)
 
-    kc = brain.kc_all_actions(o)[0, 0].astype(np.float32)  # chosen action's code
-
-    drives = (brain.drives(brain.kc_all_actions(o)))[0]  # (2, n_mbon)
-    a = int(np.argmax(brain.values(o)[0]))
+    kcs = brain.kc_all_actions(o) if kcs is None else kcs
+    kc = kcs[0, 0].astype(np.float32)  # chosen action's code
+    drives = brain.drives(kcs)[0]      # (2, n_mbon)
+    a = int(np.argmax(brain._q_from_kc(kcs)[0]))
     mbon = np.abs(drives[a])
     mbon = mbon / max(mbon.max(), 1e-9)
 
@@ -258,6 +259,7 @@ def run_live(args) -> None:
     clock = view.clock
     speed = 1
     running = True
+    frame = 0
     while running:
         for event in view.pygame.event.get():
             if event.type == pygame.QUIT:
@@ -274,9 +276,11 @@ def run_live(args) -> None:
         done = False
         rpe = None
         q_taken = 0.0
+        kcs = None
         for _ in range(speed):
-            a, q, _ = brain.act(obs, 0.0)
+            a, q, kc_list = brain.act(obs, 0.0)
             q_taken = float(q[0, a[0]])
+            kcs = np.stack(kc_list, axis=0)[None]  # (1, 2, n_kc), cached
             nobs, r, done = view.env.step(a)
             qn = float(brain.values(nobs)[0].max()) if not done else 0.0
             rpe = float(r[0]) + brain.cfg.gamma * qn - prev_q
@@ -289,12 +293,14 @@ def run_live(args) -> None:
         traces.push(q_taken, rpe if rpe is not None else 0.0, float(obs[0][0]))
         traces.draw(view.screen.subsurface((SCREEN_W, 0, 480, view.screen.get_height())))
 
-        acts = population_activity(brain, obs, rpe if rpe is not None else 0.0)
-        act_vec = np.zeros(cloud.n_neurons, dtype=np.float32)
-        for pop, v in acts.items():
-            act_vec[cloud.offsets[pop]:cloud.offsets[pop] + cloud.counts[pop]] = v
-        update_colors(poly, cloud, act_vec)
-        plotter.render()
+        frame += 1
+        if frame % 2 == 0:  # 3D at ~30 fps: the framerate bottleneck is VTK
+            acts = population_activity(brain, obs, rpe if rpe is not None else 0.0, kcs=kcs)
+            act_vec = np.zeros(cloud.n_neurons, dtype=np.float32)
+            for pop, v in acts.items():
+                act_vec[cloud.offsets[pop]:cloud.offsets[pop] + cloud.counts[pop]] = v
+            update_colors(poly, cloud, act_vec)
+            plotter.render()
         clock.tick(60)
 
     plotter.close()

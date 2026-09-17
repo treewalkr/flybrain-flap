@@ -43,11 +43,13 @@ class FlappyEnv:
         num_envs: int,
         seed: int | None = None,
         gap_half: float = GAP_HALF,
+        shaping: float = 0.05,
     ):
         assert num_envs >= 1
         self.num_envs = num_envs
         self.rng = np.random.default_rng(seed)
         self.gap_half = gap_half
+        self.shaping = shaping
         self.reset()
 
     def obs(self) -> np.ndarray:
@@ -106,7 +108,7 @@ class FlappyEnv:
         align = 1.0 - np.minimum(
             np.abs(self.y - self.gap_center) / self.gap_half, 1.0
         )
-        rewards += (0.05 * align).astype(np.float32)
+        rewards += (self.shaping * align).astype(np.float32)
         rewards[dead] = -1.0
         self.alive &= ~dead
 
