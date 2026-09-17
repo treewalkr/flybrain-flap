@@ -31,6 +31,11 @@ def parse_args():
                    help="flap probability while exploring")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", type=str, default="runs/flap")
+    p.add_argument("--circuit", type=str, default=None,
+                   help="path to circuit.npz: use the real MaleCNS-connectome "
+                        "brain (RealMB) instead of the abstract one")
+    p.add_argument("--alpha", type=float, default=0.02,
+                   help="RealMB only: target dV per unit RPE")
     return p.parse_args()
 
 
@@ -40,9 +45,19 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     env = FlappyEnv(args.num_envs, seed=args.seed)
-    cfg = MBConfig(num_features=env.obs().shape[1], eta=args.eta,
-                   gamma=args.gamma, seed=args.seed)
-    brain = MushroomBody(cfg)
+    if args.circuit:
+        from .connectome import load as load_circuit
+        from .realbrain import RealMB, RealMBConfig, calibrate_from_env
+
+        cfg = RealMBConfig(gamma=args.gamma, alpha=args.alpha, seed=args.seed)
+        brain = RealMB(load_circuit(args.circuit), cfg)
+        info = calibrate_from_env(brain, env)
+        print("calibration:", {k: round(v, 4) if isinstance(v, float) else v
+                                for k, v in info.items()})
+    else:
+        cfg = MBConfig(num_features=env.obs().shape[1], eta=args.eta,
+                       gamma=args.gamma, seed=args.seed)
+        brain = MushroomBody(cfg)
 
     obs = env.reset()
     eps = args.eps_start
