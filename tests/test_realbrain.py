@@ -57,6 +57,43 @@ def test_bandit_learns_the_good_action():
     assert (q[:, 1] > q[:, 0]).mean() > 0.8, f"q={q.mean(0)}"
 
 
+def test_eligibility_trace_gives_delayed_credit():
+    """A reward arriving 10 ticks after the choice must reach the chosen
+    action's synapses with traces (lambda=0.9), and barely without (lambda=0).
+    Codes are constructed directly (disjoint, connected rows) so this tests
+    the trace mechanism itself, independent of the encoding."""
+    results = {}
+    for lam in (0.0, 0.9):
+        b = RealMB(tiny_circuit(seed=3), RealMBConfig(kc_active=40, seed=13, alpha=0.1,
+                                                      trace_lambda=lam))
+        rng = np.random.default_rng(4)
+        feats = rng.uniform(-1, 1, (256, 5)).astype(np.float32)
+        b.calibrate(b.encode(feats))
+
+        # disjoint synthetic codes over KCs that actually have MBON synapses
+        rows = rng.permutation(np.flatnonzero(b.w0.sum(1) > 0))
+        n_code = 20
+        code1_row, code0_row = rows[:n_code], rows[n_code:2 * n_code]
+        kc1 = np.zeros((16, b.n_kc), bool); kc1[:, code1_row] = True
+        kc0 = np.zeros((16, b.n_kc), bool); kc0[:, code0_row] = True
+        cache = [kc0, kc1]
+
+        b.learn(np.ones(16, np.int64), cache, np.zeros(16, np.float32),
+                np.zeros(16, np.float32), np.zeros(16, np.float32),
+                np.zeros(16, bool))
+        w_after = b.w.copy()
+        for _ in range(9):  # ticks 1..9: action 0, no reward
+            b.learn(np.zeros(16, np.int64), cache, np.zeros(16, np.float32),
+                    np.zeros(16, np.float32), np.zeros(16, np.float32),
+                    np.zeros(16, bool))
+        # tick 10: positive RPE — must reach the tick-0 (action 1) synapses
+        b.learn(np.zeros(16, np.int64), cache, np.ones(16, np.float32),
+                np.full(16, 0.5), np.zeros(16, np.float32), np.zeros(16, bool))
+        moved = np.abs(b.w - w_after)[code1_row]
+        results[lam] = float(moved.mean())
+    assert results[0.9] > results[0.0] * 3 + 1e-4, results
+
+
 def test_save_load_roundtrip(tmp_path):
     b = RealMB(tiny_circuit(seed=2), RealMBConfig(kc_active=40, seed=9))
     feats = np.random.default_rng(1).uniform(-1, 1, (64, 5)).astype(np.float32)

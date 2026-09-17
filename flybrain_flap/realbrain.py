@@ -42,6 +42,8 @@ class RealMBConfig:
     binary_readout: bool = True  # KC->MBON base weights: connectivity (True)
                                  # or raw synapse counts (False; count-derived
                                  # ceilings span 1000x and hub MBONs dominate)
+    trace_lambda: float = 0.0  # eligibility-trace decay per tick (0 = off;
+                               # ~0.97 marks synapses for ~30 ticks)
     seed: int | None = None
 
 
@@ -125,6 +127,7 @@ class RealMB:
         self.readout = np.zeros(self.n_mbon, dtype=np.float32)
         self.eta = 0.0
         self.calibrated = False
+        self._trace: np.ndarray | None = None  # per-bird KC eligibility traces
 
     # ---------------------------------------------------------------- sensory
     def encode(self, obs: np.ndarray) -> np.ndarray:
@@ -268,6 +271,17 @@ class RealMB:
                 "approach_mbons_used": n_app, "avoid_mbons_used": n_avd}
 
     # --------------------------------------------------------------- learning
+    def _apply_dopamine(self, coincidence: np.ndarray) -> float:
+        """w update from per-KC coincidence values: PAM (reward) compartments
+        act on avoid MBONs with +RPE, PPL1 (punishment) on approach MBONs with
+        -RPE. Weights stay in [0, w0]."""
+        signed = np.where(self.avoid[None, :], coincidence[:, None],
+                          np.where(self.approach[None, :], -coincidence[:, None], 0.0))
+        before = self.w
+        self.w = np.minimum(np.maximum(self.w - self.eta * signed, 0.0), self.w0)
+        exist = self.w0 > 0
+        return float(np.abs(self.w - before)[exist].mean()) if exist.any() else 0.0
+
     def dopamine_update(self, kc: np.ndarray, rpe: np.ndarray) -> float:
         """dw = -eta * KC * (DAN_c - baseline_c) summed over a batch.
 
@@ -277,12 +291,7 @@ class RealMB:
         lets it recover (Handler et al. 2019; Bennett et al. 2021). Weights
         stay in [0, w0]."""
         coincidence = kc.astype(np.float32).T @ rpe.astype(np.float32)  # (n_kc,)
-        signed = np.where(self.avoid[None, :], coincidence[:, None],
-                          np.where(self.approach[None, :], -coincidence[:, None], 0.0))
-        before = self.w
-        self.w = np.minimum(np.maximum(self.w - self.eta * signed, 0.0), self.w0)
-        exist = self.w0 > 0
-        return float(np.abs(self.w - before)[exist].mean()) if exist.any() else 0.0
+        return self._apply_dopamine(coincidence)
 
     def learn(
         self,
@@ -295,14 +304,35 @@ class RealMB:
         alive: np.ndarray | None = None,
     ) -> np.ndarray:
         """One dopamine update from cached forward passes (same contract as
-        MushroomBody.learn). Returns the per-agent RPE."""
+        MushroomBody.learn). Returns the per-agent RPE.
+
+        With trace_lambda > 0, each bird keeps a decaying eligibility trace of
+        its recent KC codes; dopamine hits synapses weighted by the trace, so
+        choices from the last ~1/(1-lambda) ticks get credit for this tick's
+        outcome (the fly's solution to delayed credit)."""
         target = rewards + self.cfg.gamma * q_next * (~dones)
         rpe = target - q_taken
         learn = np.ones_like(rpe, dtype=bool) if alive is None else alive
+
+        if self.cfg.trace_lambda > 0:
+            lam = self.cfg.trace_lambda
+            if self._trace is None or self._trace.shape[0] != len(rpe):
+                self._trace = np.zeros((len(rpe), self.n_kc), dtype=np.float32)
+            self._trace *= lam
+            kc_now = np.zeros((len(rpe), self.n_kc), dtype=np.float32)
+            for a in (0, 1):
+                mask = (actions == a) & learn
+                if mask.any():
+                    kc_now[mask] = kc_cache[a][mask]
+            self._trace += kc_now
+            # normalize so the effective step stays alpha-calibrated
+            coincidence = (self._trace[learn].T @ rpe[learn].astype(np.float32)) * (1.0 - lam)
+            self._apply_dopamine(coincidence)
+            return rpe
+
         for a in (0, 1):
             mask = (actions == a) & learn
             if mask.any():
-                # zero out non-learning agents so they contribute nothing
                 self.dopamine_update(kc_cache[a][mask], rpe[mask])
         return rpe
 

@@ -36,6 +36,9 @@ def parse_args():
                         "brain (RealMB) instead of the abstract one")
     p.add_argument("--shaping", type=float, default=0.05,
                    help="gap-alignment shaping reward per step")
+    p.add_argument("--trace-lambda", type=float, default=0.0,
+                   help="RealMB only: eligibility-trace decay (0 = off, "
+                        "~0.97 = synapses stay marked ~30 ticks)")
     p.add_argument("--alpha", type=float, default=0.02,
                    help="RealMB only: target dV per unit RPE")
     p.add_argument("--overlap", type=float, default=0.5,
@@ -54,7 +57,8 @@ def main():
         from .realbrain import RealMB, RealMBConfig, calibrate_from_env
 
         cfg = RealMBConfig(gamma=args.gamma, alpha=args.alpha, seed=args.seed,
-                           target_action_overlap=args.overlap)
+                           target_action_overlap=args.overlap,
+                           trace_lambda=args.trace_lambda)
         brain = RealMB(load_circuit(args.circuit), cfg)
         info = calibrate_from_env(brain, env)
         print("calibration:", {k: round(v, 4) if isinstance(v, float) else v
