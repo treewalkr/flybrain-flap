@@ -11,8 +11,11 @@ Status markers: [ ] todo, [~] in progress, [x] done.
 - [x] Training loop with per-minute logging and weight checkpoints
 - [x] Human-playable pygame game
 - [x] Realtime brain playback in the same game
+- [x] Live mushroom-body activity panel (`--brain-view`)
 - [x] Greedy evaluation + ASCII playback
-- [~] Birds reliably clear pipes after a short training run
+- [x] Birds reliably clear pipes after a short training run
+      (10 min, 64 birds: 82% first-pipe pass rate, best run 20 pipes,
+      after fixing the physics to classic flappy proportions)
 
 ## v0.2 — make the fly more real
 
@@ -34,7 +37,8 @@ Status markers: [ ] todo, [~] in progress, [x] done.
 - [ ] Load real PN→KC and KC→MBON synapse counts from a published
       connectome table instead of random wiring
 - [ ] Pathway audit script verifying wiring facts against the raw tables
-- [ ] Visualize KC/MBON/DAN activity during a trained run
+- [ ] Visualize DAN activity per compartment (the `--brain-view`
+      panel already shows KC/MBON activity and the aggregate RPE)
 
 ## Stretch
 

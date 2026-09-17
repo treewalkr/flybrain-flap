@@ -17,8 +17,9 @@ values.
    └────────────┘                   └──────┬──────┘
                                            │
                                            ▼
-                              Mushroom body output neurons (MBON)
-                              16: 8 approach, 8 avoid (per pool)
+                          Mushroom body output neurons (MBON)
+                          16 total: 8 approach + 8 avoid,
+                          each reading all KCs
 ```
 
 - **PNs** are feature detectors with broad triangular tuning curves
@@ -33,6 +34,10 @@ values.
   each action's value is read from its own synapses. This stands in for
   the real circuit's compartment-specific output neurons.
 - **KC → MBON**: learned weights in [0, w0], starting fully potentiated.
+  The 16 MBONs are shared: each reads all 1,024 KCs, so only the active
+  pool's synapses contribute to a given action's value.
+- **Dopamine neurons** are not explicit nodes: the RPE is a broadcast
+  signal applied compartment-wise (the fly has ~340 DANs).
 
 ## Value and action
 
@@ -42,8 +47,10 @@ normalized to roughly [-1, 1]:
 
     Q(s, a) = (Σ w(approach) − Σ w(avoid)) / (kc_active × mbon)
 
-Greedy policy with epsilon-greedy exploration (biased toward gliding,
-since random flapping is quickly lethal in this game).
+Greedy policy with epsilon-greedy exploration (biased toward gliding
+via `--explore-flap`, since random flapping is quickly lethal in this
+game). Discount γ = 0.99 in training: episodes run hundreds of ticks
+and a pipe passes roughly every 84 of them.
 
 ## The dopamine rule
 
@@ -75,3 +82,16 @@ involved anywhere. Weight updates are averaged over the batch of birds.
 
 The plan is to make each of these more realistic over time — see
 [ROADMAP.md](ROADMAP.md).
+
+## References and inspiration
+
+- This project is a small-scale homage to
+  [TMNF-C](https://github.com/adonis-singh/TMNF-C), which wired the
+  MaleCNS *Drosophila* connectome into a TrackMania simulator — the
+  dopamine-rule formulation and the honest reporting of what a mushroom
+  body can and cannot learn both follow its example.
+- Handler, A. et al. (2019), Cell; Bennett, J. E. M. et al. (2021),
+  Nature Communications — dopamine-mediated synaptic depression and
+  recovery in the mushroom body.
+- Aso, Y. et al. (2014); Hige, T. et al. (2015) — the compartment
+  organization this circuit simplifies.

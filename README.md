@@ -2,12 +2,16 @@
 
 A fruit fly brain plays a Flappy-Bird-like game.
 
+Inspired by [TMNF-C](https://github.com/adonis-singh/TMNF-C), which wired
+the MaleCNS *Drosophila* connectome into a TrackMania simulator.
+
 A lightweight flappy environment (pure NumPy, vectorized) driven by a
-mushroom body inspired by the *Drosophila* learning circuit: projection
+mushroom body modeled on the *Drosophila* learning circuit: projection
 neurons encode the state, Kenyon cells form a sparse coincidence code,
 mushroom body output neurons read that code, and dopamine
 reward-prediction error depresses and restores the active synapses.
 No gradients, no backprop — the fly's own trial-and-error rule.
+The circuit is small on purpose: 35 PNs, 1,024 KCs, 16 MBONs.
 
 ## Setup
 
@@ -23,16 +27,18 @@ Everything runs from the repo root without installing the package.
 
 ```bash
 # play it yourself first (SPACE or click to flap)
-python -m flybrain_flap.game --human
+.venv/bin/python -m flybrain_flap.game --human
 
 # train the brain for 10 minutes on 64 parallel birds
-python -m flybrain_flap.train --minutes 10 --num-envs 64 --out runs/flap1
+.venv/bin/python -m flybrain_flap.train --minutes 10 --num-envs 64 \
+    --eta 0.05 --gamma 0.99 --out runs/flap1
 
-# watch the trained brain play in realtime
-python -m flybrain_flap.game --brain runs/flap1/weights.npz
+# watch the trained brain play in realtime, with the live
+# mushroom-body activity panel (PNs, KC codes, MBONs, values, dopamine)
+.venv/bin/python -m flybrain_flap.game --brain runs/flap1/weights.npz --brain-view
 
 # or headless, as ASCII frames
-python -m flybrain_flap.play runs/flap1/weights.npz --episodes 3
+.venv/bin/python -m flybrain_flap.play runs/flap1/weights.npz --episodes 3
 ```
 
 Training writes `train.csv` (per-minute stats), `weights.npz` (the
