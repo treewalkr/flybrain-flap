@@ -18,6 +18,7 @@ Requires `python -m flybrain_flap.fetch_connectome` data and a trained RealMB.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -149,11 +150,92 @@ def update_colors(poly, cloud: SkeletonCloud, act_vec: np.ndarray):
     poly.point_data["act"] = activity_color(act_vec[cloud.neuron])
 
 
+class TracePanel:
+    """Rolling activity traces beside the game (the reference repo's video
+    overlay style): MBON value, dopamine PAM+ / PPL1-, bird height."""
+
+    WIDTH, HEIGHT = 480, 640
+    BG = (16, 16, 22)
+    TEXT = (200, 200, 210)
+    GRID = (52, 56, 66)
+    COL_VALUE = (255, 214, 64)
+    COL_PAM = (80, 200, 120)
+    COL_PPL1 = (220, 90, 90)
+    COL_HEIGHT = (120, 170, 255)
+
+    def __init__(self, maxlen: int = 360):
+        import pygame
+
+        self.pygame = pygame
+        self.font = pygame.font.SysFont(None, 20)
+        self.n = maxlen
+        self.value = deque(maxlen=maxlen)
+        self.pam = deque(maxlen=maxlen)     # +RPE dopamine
+        self.ppl1 = deque(maxlen=maxlen)    # -RPE dopamine
+        self.height = deque(maxlen=maxlen)
+
+    def push(self, value: float, rpe: float, height: float) -> None:
+        self.value.append(value)
+        self.pam.append(max(rpe, 0.0))
+        self.ppl1.append(max(-rpe, 0.0))
+        self.height.append(height)
+
+    def _series(self, surf, box, series, color, label, zero_line=False):
+        x0, y0, x1, y1 = box
+        self.pygame.draw.rect(surf, (22, 22, 30), box, 1)
+        lab = self.font.render(label, True, self.TEXT)
+        surf.blit(lab, (x0 + 6, y0 + 2))
+        pts = list(series)
+        if len(pts) < 2:
+            return
+        vals = np.array(pts)
+        span = max(np.abs(vals).max(), 1e-6)
+        if zero_line:
+            mid = y0 + (y1 - y0) // 2 + 8
+            self.pygame.draw.line(surf, self.GRID, (x0 + 4, mid), (x1 - 4, mid), 1)
+            step = (x1 - x0 - 8) / (self.n - 1)
+            offset = self.n - len(pts)
+            pixels = [
+                (x0 + 4 + (offset + i) * step,
+                 mid - v / span * ((y1 - y0) // 2 - 14))
+                for i, v in enumerate(pts)
+            ]
+        else:
+            lo, hi = float(vals.min()), float(vals.max())
+            rng = max(hi - lo, 1e-6)
+            step = (x1 - x0 - 8) / (self.n - 1)
+            offset = self.n - len(pts)
+            pixels = [
+                (x0 + 4 + (offset + i) * step,
+                 y1 - 14 - (v - lo) / rng * (y1 - y0 - 30))
+                for i, v in enumerate(pts)
+            ]
+        self.pygame.draw.lines(surf, color, False, pixels, 2)
+
+    def draw(self, surf) -> None:
+        self.pygame.draw.rect(surf, self.BG, (0, 0, self.WIDTH, self.HEIGHT))
+        w = self.WIDTH - 24
+        h = self.HEIGHT
+        self._series(surf, (12, 10, 12 + w, 10 + int(0.22 * h)),
+                     self.value, self.COL_VALUE,
+                     "MBON value  (approach - avoid)", zero_line=True)
+        self._series(surf, (12, int(0.25 * h), 12 + w, int(0.25 * h) + int(0.24 * h)),
+                     self.pam, self.COL_PAM,
+                     "dopamine  PAM + (better than expected)")
+        self._series(surf, (12, int(0.52 * h), 12 + w, int(0.52 * h) + int(0.24 * h)),
+                     self.ppl1, self.COL_PPL1,
+                     "dopamine  PPL1 - (worse than expected)")
+        self._series(surf, (12, int(0.79 * h), 12 + w, int(0.79 * h) + int(0.19 * h)),
+                     self.height, self.COL_HEIGHT,
+                     "bird height")
+
+
 def run_live(args) -> None:
     """Real-time: pygame game window + interactive 3D brain window, one loop."""
     import pygame
+    from collections import deque
 
-    from .game import GameView
+    from .game import SCREEN_W, GameView
     from .realbrain import RealMB, RealMBConfig
 
     circuit = load_circuit()
@@ -169,7 +251,8 @@ def run_live(args) -> None:
     plotter, poly = build_scene(cloud, stride=1, off_screen=False)
     plotter.show(interactive_update=True, auto_close=False)
 
-    view = GameView(seed=args.seed)
+    view = GameView(seed=args.seed, brain_view=True)
+    traces = TracePanel()
     obs = view.env.reset()
     prev_q = float(brain.values(obs)[0].max())
     clock = view.clock
@@ -190,8 +273,10 @@ def run_live(args) -> None:
 
         done = False
         rpe = None
+        q_taken = 0.0
         for _ in range(speed):
             a, q, _ = brain.act(obs, 0.0)
+            q_taken = float(q[0, a[0]])
             nobs, r, done = view.env.step(a)
             qn = float(brain.values(nobs)[0].max()) if not done else 0.0
             rpe = float(r[0]) + brain.cfg.gamma * qn - prev_q
@@ -201,6 +286,8 @@ def run_live(args) -> None:
                 obs = view.env.reset()
                 prev_q = 0.0
         view.draw(flash_flap=bool(a[0] == 1))
+        traces.push(q_taken, rpe if rpe is not None else 0.0, float(obs[0][0]))
+        traces.draw(view.screen.subsurface((SCREEN_W, 0, 480, view.screen.get_height())))
 
         acts = population_activity(brain, obs, rpe if rpe is not None else 0.0)
         act_vec = np.zeros(cloud.n_neurons, dtype=np.float32)
