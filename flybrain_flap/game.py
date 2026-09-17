@@ -55,7 +55,8 @@ class GameView:
     def draw(self, flash_flap: bool = False):
         pygame = self.pygame
         env = self.env
-        px = env.BIRD_X * 3  # bird is at 25% of a ~0.75-wide visible window
+        world_to_screen = lambda wx: int(wx / 0.75 * SCREEN_W)
+        bx = world_to_screen(env.BIRD_X)
 
         self.screen.fill(SKY)
         pygame.draw.rect(
@@ -63,7 +64,7 @@ class GameView:
         )
 
         # next pipe
-        col = int(px / 0.75 * SCREEN_W)
+        col = world_to_screen(env.next_pipe_x[0])
         gap_top = self._scale_y(env.gap_center[0] + env.gap_half)
         gap_bot = self._scale_y(env.gap_center[0] - env.gap_half)
         width = 60
@@ -79,7 +80,6 @@ class GameView:
         )
 
         # bird
-        bx = int(px / 0.75 * SCREEN_W)
         by = self._scale_y(env.y[0])
         r = 14 if flash_flap else 12
         pygame.draw.circle(self.screen, BIRD, (bx, by), r)
