@@ -36,6 +36,8 @@ def parse_args():
                         "brain (RealMB) instead of the abstract one")
     p.add_argument("--alpha", type=float, default=0.02,
                    help="RealMB only: target dV per unit RPE")
+    p.add_argument("--overlap", type=float, default=0.5,
+                   help="RealMB only: target KC-code overlap between actions")
     return p.parse_args()
 
 
@@ -49,7 +51,8 @@ def main():
         from .connectome import load as load_circuit
         from .realbrain import RealMB, RealMBConfig, calibrate_from_env
 
-        cfg = RealMBConfig(gamma=args.gamma, alpha=args.alpha, seed=args.seed)
+        cfg = RealMBConfig(gamma=args.gamma, alpha=args.alpha, seed=args.seed,
+                           target_action_overlap=args.overlap)
         brain = RealMB(load_circuit(args.circuit), cfg)
         info = calibrate_from_env(brain, env)
         print("calibration:", {k: round(v, 4) if isinstance(v, float) else v

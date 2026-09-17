@@ -33,9 +33,15 @@ class RealMBConfig:
     pn_action_fraction: float = 0.5  # fraction of PNs that also read an action code
     pn_quantile: float = 0.5   # PN activation threshold at this quantile of input
     target_action_overlap: float = 0.5  # KC-code overlap between actions
+    num_bins: int = 7          # triangular tuning bins per feature (antennal lobe)
+    bin_width: float = 0.6     # tuning width in feature units (features ~[-1,1])
+    pn_state_inputs: int = 8   # tuning bins each real PN reads (sparse, like ALPNs)
     gain: float = 1.0          # value scale (approach-minus-avoid drive)
     alpha: float = 0.02        # target effective dV per unit RPE
     gamma: float = 0.99        # discount
+    binary_readout: bool = True  # KC->MBON base weights: connectivity (True)
+                                 # or raw synapse counts (False; count-derived
+                                 # ceilings span 1000x and hub MBONs dominate)
     seed: int | None = None
 
 
@@ -65,13 +71,30 @@ class RealMB:
         self.approach = group == APPROACH
         self.avoid = group == AVOID
 
-        # plastic weights start at the real synapse counts (normalized in calibrate)
-        self.w0_base = c["kc_mbon"].astype(np.float32)
+        # antennal lobe: features enter as coarse triangular tuning over bins
+        # (like the abstract brain's PNs), then every real PN reads a sparse
+        # random subset of the bins — the fly's glomerular wiring
+        self.num_bins = cfg.num_bins
+        self.bin_width = cfg.bin_width
+        self.n_sensory = 5 * cfg.num_bins
+        centers = np.linspace(-1.0, 1.0, cfg.num_bins, dtype=np.float32)
+        self.bin_centers = np.tile(centers, 5)
 
-        # random sensory projection: every real PN reads a random mixture of
-        # the game features; a fraction also reads one action-code dimension
+        # plastic weights start at the real connectivity, optionally scaled by
+        # synapse counts (normalized in calibrate)
+        kc_mbon = c["kc_mbon"].astype(np.float32)
+        if cfg.binary_readout:
+            kc_mbon = (kc_mbon > 0).astype(np.float32)
+        self.w0_base = kc_mbon
+
+        # random sensory projection: every real PN reads pn_state_inputs random
+        # tuning bins; a fraction also reads one action-code dimension
         cfg = self.cfg
-        self.pn_u = self.rng.standard_normal((self.n_pn, self.n_features)).astype(np.float32)
+        u = np.zeros((self.n_pn, self.n_sensory), dtype=np.float32)
+        for i in range(self.n_pn):
+            cols = self.rng.choice(self.n_sensory, cfg.pn_state_inputs, replace=False)
+            u[i, cols] = self.rng.standard_normal(cfg.pn_state_inputs)
+        self.pn_u = u
         reads = self.rng.random(self.n_pn) < cfg.pn_action_fraction
         act_col = self.rng.integers(0, cfg.n_action_dims, self.n_pn)
         act_sign = self.rng.choice(np.array([-1.0, 1.0], dtype=np.float32), self.n_pn)
@@ -82,8 +105,8 @@ class RealMB:
         assert self.action_codes is not None, "need at least 2 action dims"
 
         # calibration results
-        self.feat_mean = np.zeros(self.n_features, dtype=np.float32)
-        self.feat_scale = np.ones(self.n_features, dtype=np.float32)
+        self.feat_mean = np.zeros(self.n_sensory, dtype=np.float32)
+        self.feat_scale = np.ones(self.n_sensory, dtype=np.float32)
         self.pn_theta = np.zeros(self.n_pn, dtype=np.float32)
         self.pn_scale = np.ones(self.n_pn, dtype=np.float32)
         self.action_gain = 1.0
@@ -94,6 +117,14 @@ class RealMB:
         self.calibrated = False
 
     # ---------------------------------------------------------------- sensory
+    def encode(self, obs: np.ndarray) -> np.ndarray:
+        """Raw observations (N, 5) -> antennal-lobe code (N, 5*num_bins):
+        triangular tuning per feature, like the abstract brain's PNs."""
+        x = obs[:, None, :5]  # (N, 1, F)
+        d = np.abs(x - self.bin_centers.reshape(1, -1, 5))
+        r = np.maximum(1.0 - d / self.bin_width, 0.0)
+        return r.max(axis=2).reshape(obs.shape[0], self.n_sensory).astype(np.float32)
+
     def _pn_pre(self, features: np.ndarray, codes: np.ndarray) -> np.ndarray:
         x = (features - self.feat_mean) / self.feat_scale
         return x @ self.pn_u.T + self.action_gain * (codes @ self.pn_action_mask.T)
@@ -110,10 +141,11 @@ class RealMB:
         np.put_along_axis(kc, idx, True, axis=1)
         return kc
 
-    def kc_all_actions(self, features: np.ndarray) -> np.ndarray:
-        """(N, F) -> (N, A, n_kc) bool codes for every candidate action."""
+    def kc_all_actions(self, obs: np.ndarray) -> np.ndarray:
+        """(N, 5) raw obs -> (N, A, n_kc) bool codes for every candidate action."""
+        features = self.encode(obs)
         n = features.shape[0]
-        f = np.repeat(features[:, None, :], 2, axis=1).reshape(-1, self.n_features)
+        f = np.repeat(features[:, None, :], 2, axis=1).reshape(-1, self.n_sensory)
         c = np.repeat(self.action_codes[None, :, :], n, axis=0).reshape(-1, 2)
         return self.kc_code(f, c).reshape(n, 2, self.n_kc)
 
@@ -302,12 +334,12 @@ class RealMB:
 def calibrate_from_env(brain: RealMB, env, steps: int = 4096) -> dict:
     """Collect a calibration batch of live-bird states with a random policy."""
     obs = env.reset()
-    batch = np.zeros((steps, brain.n_features), dtype=np.float32)
+    batch = np.zeros((steps, brain.n_sensory), dtype=np.float32)
     got = 0
     while got < steps:
         live = obs[env.alive]
         take = min(len(live), steps - got)
-        batch[got:got + take] = live[:take]
+        batch[got:got + take] = brain.encode(live[:take])
         got += take
         obs, _, _ = env.step(env.rng.integers(0, 2, obs.shape[0]))
         if not env.alive.any():

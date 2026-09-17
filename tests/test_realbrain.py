@@ -30,7 +30,7 @@ def test_code_is_sparse_and_topk():
     b = RealMB(tiny_circuit(), RealMBConfig(kc_active=40, seed=3))
     feats = np.random.default_rng(0).uniform(-1, 1, (64, 5)).astype(np.float32)
     b.feat_mean, b.feat_scale = feats.mean(0), feats.std(0)
-    kc = b.kc_code(feats, np.zeros((64, 2), np.float32))
+    kc = b.kc_code(b.encode(feats), np.zeros((64, 2), np.float32))
     assert kc.shape == (64, 200)
     assert (kc.sum(axis=1) == 40).all()  # exactly top-k per bird
 
@@ -41,7 +41,7 @@ def test_bandit_learns_the_good_action():
     b = RealMB(tiny_circuit(seed=1), RealMBConfig(kc_active=40, seed=5, alpha=0.05))
     rng = np.random.default_rng(7)
     feats = rng.uniform(-1, 1, (512, 5)).astype(np.float32)
-    b.calibrate(feats)
+    b.calibrate(b.encode(feats))
     assert b.readout[b.approach & (b.w0.sum(0) > 0)].sum() > 0
     assert b.readout[b.avoid & (b.w0.sum(0) > 0)].sum() < 0
 
@@ -59,7 +59,7 @@ def test_bandit_learns_the_good_action():
 def test_save_load_roundtrip(tmp_path):
     b = RealMB(tiny_circuit(seed=2), RealMBConfig(kc_active=40, seed=9))
     feats = np.random.default_rng(1).uniform(-1, 1, (64, 5)).astype(np.float32)
-    b.calibrate(feats)
+    b.calibrate(b.encode(feats))
     b.w = b.w * 0.5  # pretend some learning happened
     b.save(tmp_path / "w.npz")
     b2 = RealMB(tiny_circuit(seed=2), RealMBConfig(kc_active=40, seed=9))
@@ -71,7 +71,7 @@ def test_save_load_roundtrip(tmp_path):
 def test_weights_stay_bounded():
     b = RealMB(tiny_circuit(seed=4), RealMBConfig(kc_active=40, seed=11, alpha=0.5))
     feats = np.random.default_rng(3).uniform(-1, 1, (64, 5)).astype(np.float32)
-    b.calibrate(feats)
+    b.calibrate(b.encode(feats))
     obs = feats[:32]
     for step in range(200):
         r = 1.0 if step % 2 == 0 else -1.0
