@@ -8,31 +8,42 @@ values.
 ## Wiring
 
 ```
- state (5) + one-hot action (2)      fixed random sparse
-            │                        ┌────────────────┐
-            ▼                        ▼                │
-     Projection neurons (PN) ──►  Kenyon cells (KC)  │  top-k winner-take-all
-            7                  512 (20 active)        │
-                                       │            │
-                                       ▼            │
+ state features (5)                PN tuning curves (7 bins/feature)
+        │                                   │
+        ▼                                   ▼
+   ┌────────────┐   random sparse    ┌─────────────┐
+   │ Projection │ ────────────────► │ Kenyon cells │  coincidence code:
+   │  neurons   │   ~3 PNs per KC   │  2×512 pools │  top-16 per pool
+   └────────────┘                   └──────┬──────┘
+                                           │
+                                           ▼
                               Mushroom body output neurons (MBON)
-                                     16 total: 8 approach, 8 avoid
+                              16: 8 approach, 8 avoid (per pool)
 ```
 
-- **PN → KC**: fixed random binary matrix, ~6 PNs per KC, never learned.
-- **KC firing**: only the 20 KCs with the largest drive fire — a sparse,
-  decorrelated code of (state, action). Sparse codes make synapse
-  updates touch only a few weights, like the real ~5% KC response.
-- **KC → MBON**: learned weights, bounded in [0, w0].
+- **PNs** are feature detectors with broad triangular tuning curves
+  (7 bins per feature): each feature softly activates 1–2 PNs, like
+  odour glomeruli responding to odorant concentration.
+- **KCs** are coincidence detectors: each Kenyon cell reads ~3 random
+  PNs (from distinct features) and is driven by the *weakest* of them —
+  a soft AND. Only the 16 KCs with the strongest coincidence fire per
+  pool (~3% sparse code, like the real ~5%).
+- **KC pools**: Kenyon cells are split into one pool per candidate
+  action, so the (state, action) code is disjoint between actions and
+  each action's value is read from its own synapses. This stands in for
+  the real circuit's compartment-specific output neurons.
+- **KC → MBON**: learned weights in [0, w0], starting fully potentiated.
 
 ## Value and action
 
-The value of an action is the summed drive of its active KC synapses
-onto approach MBONs minus the drive onto avoid MBONs:
+The value of an action is the summed drive of its pool's active KC
+synapses onto approach MBONs minus the drive onto avoid MBONs,
+normalized to roughly [-1, 1]:
 
-    Q(s, a) = Σ w(approach) − Σ w(avoid)
+    Q(s, a) = (Σ w(approach) − Σ w(avoid)) / (kc_active × mbon)
 
-Greedy policy with epsilon-greedy exploration.
+Greedy policy with epsilon-greedy exploration (biased toward gliding,
+since random flapping is quickly lethal in this game).
 
 ## The dopamine rule
 
@@ -43,22 +54,23 @@ The reward-prediction error
 becomes dopamine, split by compartment (Handler et al. 2019,
 Bennett et al. 2021):
 
-- **Positive RPE → PAM compartments** → depress active KC→*avoid*
-  synapses (the outcome was better than expected, so unlearn avoidance).
-- **Negative RPE → PPL1 compartments** → depress active KC→*approach*
-  synapses (unlearn approach).
+- **Above-baseline dopamine (positive RPE) → PAM neurons** depress the
+  active KC→*avoid* synapses: the outcome was better than expected, so
+  unlearn avoidance. Below-baseline dopamine lets them recover.
+- **Below-baseline dopamine (negative RPE) → PPL1 neurons** depress the
+  active KC→*approach* synapses and recovery runs the other way.
 
-Dopamine only ever *depresses* active synapses. Weights recover toward
-w0 slowly when the synapse is active without dopamine. Everything stays
-in [0, w0]. No gradients anywhere.
+So deviations from the dopamine baseline drive depression *and*
+recovery symmetrically, weights stay in [0, w0], and no gradients are
+involved anywhere. Weight updates are averaged over the batch of birds.
 
 ## Known simplifications
 
-- State and action enter the PNs directly rather than through antennal
-  lobe glomeruli.
-- No lateral inhibition / feed-forward normalization between PN and KC
-  beyond the top-k.
-- One compartment per MBON class rather than the 15 real lobes.
+- State features enter PNs directly rather than through a full antennal
+  lobe with lateral inhibition.
+- One compartment class per MBON rather than the 15 real lobes.
+- Per-action KC pools instead of a single mixed code read out by
+  competing MBONs (the mixed code is on the roadmap).
 - Rate-based; no spiking.
 
 The plan is to make each of these more realistic over time — see
