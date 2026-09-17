@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .brain import MBConfig, MushroomBody
+from .brainview import PANEL_W, BrainPanel
 from .env import FlappyEnv
 
 SCREEN_W, SCREEN_H = 480, 640
@@ -33,18 +34,22 @@ TEXT = (40, 40, 40)
 class GameView:
     """Single-bird flappy game with pygame rendering."""
 
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: int | None = None, brain_view: bool = False):
         import pygame
 
+        self.brain_view = brain_view
         self.pygame = pygame
         pygame.init()
-        self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+        width = SCREEN_W + (PANEL_W if brain_view else 0)
+        self.screen = pygame.display.set_mode((width, SCREEN_H))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont(None, 32)
         self.big_font = pygame.font.SysFont(None, 64)
         self.env = FlappyEnv(1, seed=seed)
         self.obs = self.env.reset()
         self.paused = False
+        self.brain_panel = None
+        self.prev_q = None
 
     # -- drawing ---------------------------------------------------------
 
@@ -58,7 +63,7 @@ class GameView:
         world_to_screen = lambda wx: int(wx / 0.75 * SCREEN_W)
         bx = world_to_screen(env.BIRD_X)
 
-        self.screen.fill(SKY)
+        pygame.draw.rect(self.screen, SKY, (0, 0, SCREEN_W, SCREEN_H))
         pygame.draw.rect(
             self.screen, GROUND, (0, self._scale_y(0.0), SCREEN_W, 40)
         )
@@ -173,13 +178,27 @@ class GameView:
                 # brain frames: `speed` env steps per display frame
                 flash = False
                 done = False
+                rpe = None
                 for _ in range(speed):
-                    actions, _, _ = brain.act(self.obs, epsilon=0.0)
+                    actions, q, _ = brain.act(self.obs, epsilon=0.0)
                     flash = bool(actions[0] == 1)
-                    self.obs, _, done = self.env.step(actions)
+                    q_taken = float(q[0, actions[0]])
+                    next_obs, rewards, done = self.env.step(actions)
+                    q_next = float(brain.values(next_obs).max())
+                    rpe = float(rewards[0]) + brain.cfg.gamma * q_next * (not done) - q_taken
+                    self.obs = next_obs
                     if done:
                         break
                 self.draw(flash_flap=flash)
+                if self.brain_panel is not None:
+                    act_snapshot = brain.observe(self.obs)
+                    panel_surf = self.screen.subsurface(
+                        (SCREEN_W, 0, PANEL_W, SCREEN_H)
+                    )
+                    self.brain_panel.draw(
+                        panel_surf, act_snapshot,
+                        chosen=int(actions[0]), rpe=rpe,
+                    )
                 if done:
                     game_over_frames += 1
                     if game_over_frames > 90:
@@ -227,14 +246,24 @@ def main():
                    help="env steps per frame in brain mode")
     p.add_argument("--tps", type=int, default=60,
                    help="env ticks per second in human mode")
+    p.add_argument("--brain-view", action="store_true",
+                   help="live mushroom-body panel next to the game")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
 
-    view = GameView(seed=args.seed)
+    view = GameView(seed=args.seed, brain_view=args.brain_view)
     if args.human:
         view.run(brain=None, tps=args.tps)
     elif args.brain:
         brain = load_brain(args.brain, view.env.obs().shape[1])
+        if args.brain_view:
+            view.brain_panel = BrainPanel(
+                num_features=brain.cfg.num_features,
+                num_bins=brain.cfg.num_bins,
+                num_kc=brain.cfg.num_kc,
+                num_mbon=brain.cfg.num_mbon_per_class,
+                num_actions=brain.cfg.num_actions,
+            )
         view.run(brain=brain, speed=args.speed)
     else:
         p.error("choose --human or --brain WEIGHTS")

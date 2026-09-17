@@ -187,6 +187,23 @@ class MushroomBody:
 
         return rpe
 
+    def observe(self, obs: np.ndarray) -> dict:
+        """Full activity snapshot for visualization (single or batch obs).
+
+        Returns PN tuning responses, KC codes, per-action MBON drives and
+        action values, so a viewer can draw the circuit while it runs.
+        """
+        pn = self._pn_activity(obs)  # (N, F, B)
+        q = np.zeros((obs.shape[0], self.cfg.num_actions), dtype=np.float32)
+        kcs, app, avd = [], [], []
+        for a in range(self.cfg.num_actions):
+            kc = self._kc_activity(obs, a)
+            kcs.append(kc)
+            app.append(kc.astype(np.float32) @ self.w_approach)  # (N, m)
+            avd.append(kc.astype(np.float32) @ self.w_avoid)
+            q[:, a] = self._q_from_kc(kc)
+        return {"pn": pn, "kc": kcs, "app": app, "avd": avd, "q": q}
+
     # -- persistence -----------------------------------------------------
 
     def save(self, path: str):
