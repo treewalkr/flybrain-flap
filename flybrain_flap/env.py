@@ -26,12 +26,15 @@ class FlappyEnv:
     birds are dead.
     """
 
-    GRAVITY = 0.02
-    FLAP_VELOCITY = 0.18
-    MAX_FALL_SPEED = 0.5
-    PIPE_SPEED = 0.03
-    PIPE_SPACING = 1.0
-    GAP_HALF = 0.22
+    # classic flappy proportions, in screen-height units per 60 Hz tick:
+    # a flap lifts ~8% of the screen over a ~0.4 s arc, gravity takes ~1.2 s
+    # to pull the bird from mid-screen to the floor
+    GRAVITY = 0.0005
+    FLAP_VELOCITY = 0.009
+    MAX_FALL_SPEED = 0.02
+    PIPE_SPEED = 0.005
+    PIPE_SPACING = 0.42
+    GAP_HALF = 0.15
     BIRD_X = 0.25
     WORLD_HEIGHT = 1.0
 
@@ -55,7 +58,7 @@ class FlappyEnv:
         self.y = np.full(n, 0.5)
         self.vy = np.zeros(n)
         self.alive = np.ones(n, dtype=bool)
-        # first pipe starts off to the right
+        # first pipe starts off to the right, ~1.2 s away
         self.next_pipe_x = np.full(n, 0.6)
         self.gap_center = self.rng.uniform(
             self.gap_half + 0.05, self.WORLD_HEIGHT - self.gap_half - 0.05, n
@@ -70,7 +73,7 @@ class FlappyEnv:
         px = self.next_pipe_x[live]
         gc = self.gap_center[live]
         obs[live, 0] = self.y[live] * 2.0 - 1.0
-        obs[live, 1] = self.vy[live] * 2.0
+        obs[live, 1] = self.vy[live] / self.MAX_FALL_SPEED  # ~[-1, 0.45]
         obs[live, 2] = (px - self.BIRD_X) / self.PIPE_SPACING
         obs[live, 3] = (gc - self.y[live]) * 2.0
         obs[live, 4] = self.gap_half * 4.0
@@ -107,8 +110,8 @@ class FlappyEnv:
         rewards[dead] = -1.0
         self.alive &= ~dead
 
-        # pipe passed
-        passed = self.alive & (self.next_pipe_x < self.BIRD_X)
+        # pipe passed once it is fully behind the bird
+        passed = self.alive & (self.next_pipe_x < self.BIRD_X - 0.03)
         rewards[passed] += 1.0
         self.pipes_passed += passed
         new_gc = self.rng.uniform(

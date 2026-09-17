@@ -23,6 +23,8 @@ def parse_args():
     p.add_argument("--minutes", type=float, default=10.0)
     p.add_argument("--num-envs", type=int, default=64)
     p.add_argument("--eta", type=float, default=0.02)
+    p.add_argument("--gamma", type=float, default=0.99,
+                   help="discount (episodes are ~200+ ticks)")
     p.add_argument("--eps-start", type=float, default=0.2)
     p.add_argument("--eps-end", type=float, default=0.01)
     p.add_argument("--explore-flap", type=float, default=0.15,
@@ -38,7 +40,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     env = FlappyEnv(args.num_envs, seed=args.seed)
-    cfg = MBConfig(num_features=env.obs().shape[1], eta=args.eta, seed=args.seed)
+    cfg = MBConfig(num_features=env.obs().shape[1], eta=args.eta,
+                   gamma=args.gamma, seed=args.seed)
     brain = MushroomBody(cfg)
 
     obs = env.reset()

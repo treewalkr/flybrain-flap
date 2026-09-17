@@ -115,12 +115,22 @@ class GameView:
 
     # -- loop ------------------------------------------------------------
 
-    def run(self, brain: MushroomBody | None = None, speed: int = 1):
+    def run(
+        self,
+        brain: MushroomBody | None = None,
+        speed: int = 1,
+        tps: int = 20,
+    ):
+        """Run the game loop. Human mode ticks the env `tps` times per
+        second (flap inputs are buffered between ticks); brain mode takes
+        `speed` env steps per 60 fps display frame."""
         pygame = self.pygame
         running = True
         game_over_frames = 0
+        skip = max(1, round(FPS / tps))  # display frames per env tick
+        frame = 0
+        flap_buffered = False
         while running:
-            flap_pressed = False
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -133,11 +143,12 @@ class GameView:
                     elif event.key == pygame.K_p:
                         self.paused = not self.paused
                     elif event.key == pygame.K_SPACE:
-                        flap_pressed = True
-                        if speed < 8:
+                        if brain is None:
+                            flap_buffered = True
+                        elif speed < 8:
                             speed *= 2
                 elif event.type == pygame.MOUSEBUTTONDOWN and brain is None:
-                    flap_pressed = True
+                    flap_buffered = True
 
             if self.paused:
                 self.clock.tick(FPS)
@@ -145,12 +156,17 @@ class GameView:
                 continue
 
             if brain is None:
-                # human frame
-                actions = np.array(
-                    [1 if flap_pressed else 0], dtype=np.int64
-                )
-                self.obs, _, done = self.env.step(actions)
-                self.draw(flash_flap=bool(flap_pressed))
+                # human frame: step the env every `skip` display frames
+                flapped_now = False
+                done = False
+                if frame % skip == 0:
+                    actions = np.array(
+                        [1 if flap_buffered else 0], dtype=np.int64
+                    )
+                    flap_buffered = False
+                    flapped_now = bool(actions[0])
+                    self.obs, _, done = self.env.step(actions)
+                self.draw(flash_flap=flapped_now)
                 if done:
                     self._wait_restart()
             else:
@@ -174,6 +190,7 @@ class GameView:
                 else:
                     game_over_frames = 0
 
+            frame += 1
             self.clock.tick(FPS)
         pygame.quit()
 
@@ -208,12 +225,14 @@ def main():
     p.add_argument("--brain", type=str, help="weights.npz to watch")
     p.add_argument("--speed", type=int, default=1,
                    help="env steps per frame in brain mode")
+    p.add_argument("--tps", type=int, default=60,
+                   help="env ticks per second in human mode")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
 
     view = GameView(seed=args.seed)
     if args.human:
-        view.run(brain=None)
+        view.run(brain=None, tps=args.tps)
     elif args.brain:
         brain = load_brain(args.brain, view.env.obs().shape[1])
         view.run(brain=brain, speed=args.speed)
