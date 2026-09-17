@@ -119,11 +119,15 @@ def main():
 
             ta, _, _ = teacher.act(obs, 0.0)             # teacher flies
             sa, q, kc_cache = student.act(obs, 0.0, kcs=pending_kcs)
-            agree = (ta == sa)
+            agree = (ta == sa)                            # metric only
             agree_ema += 0.001 * (float(agree.mean()) - agree_ema)
 
             next_obs, rewards, done = env.step(ta)        # execute teacher
-            rewards = rewards + np.where(agree, args.agree, -args.agree)
+            # constant imitation bonus on the EXECUTED action: TD bootstrap
+            # raises Q(s, teacher) at visited states, so greedy tracks the
+            # teacher. (A disagreement penalty backfires: it depresses the
+            # very action we want reinforced when the student strays.)
+            rewards = rewards + args.agree
 
             newly_dead = prev_alive & ~env.alive
             pending_kcs = student.kc_all_actions(next_obs)
