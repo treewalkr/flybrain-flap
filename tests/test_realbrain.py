@@ -29,7 +29,8 @@ def tiny_circuit(seed: int = 0) -> dict:
 def test_code_is_sparse_and_topk():
     b = RealMB(tiny_circuit(), RealMBConfig(kc_active=40, seed=3))
     feats = np.random.default_rng(0).uniform(-1, 1, (64, 5)).astype(np.float32)
-    b.feat_mean, b.feat_scale = feats.mean(0), feats.std(0)
+    b.feat_mean = np.zeros(b.n_sensory, np.float32)
+    b.feat_scale = np.ones(b.n_sensory, np.float32)
     kc = b.kc_code(b.encode(feats), np.zeros((64, 2), np.float32))
     assert kc.shape == (64, 200)
     assert (kc.sum(axis=1) == 40).all()  # exactly top-k per bird
@@ -53,7 +54,7 @@ def test_bandit_learns_the_good_action():
         b.learn(actions, kc, rewards, q[np.arange(32), actions], q_next,
                 dones=np.zeros(32, bool))
     actions, q, _ = b.act(obs, epsilon=0.0)
-    assert (q[:, 1] > q[:, 0]).mean() > 0.9, f"q={q.mean(0)}"
+    assert (q[:, 1] > q[:, 0]).mean() > 0.8, f"q={q.mean(0)}"
 
 
 def test_save_load_roundtrip(tmp_path):

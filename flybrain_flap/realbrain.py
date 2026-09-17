@@ -59,10 +59,20 @@ class RealMB:
         self.n_mbon = c["kc_mbon"].shape[1]
         self.n_features = 5  # flappy observation width
 
-        # fixed expansion: weighted mean of a KC's PN inputs
-        col = pn_kc.sum(axis=0, keepdims=True)
-        self.kc_has_input = col.ravel() > 0
-        self.pn_kc = pn_kc / np.maximum(col, 1.0)
+        # fixed expansion: each KC is a COINCIDENCE DETECTOR over its real PN
+        # inputs (soft-AND via min-pooling, like the claw synapses) — a mean
+        # would cancel inputs that are active for one action but not the other
+        self.kc_has_input = (pn_kc > 0).any(axis=0)
+        pre, post = np.nonzero(pn_kc)
+        order = np.argsort(post, kind="stable")
+        self.edge_pre = pre[order].astype(np.int64)
+        post_sorted = post[order]
+        # first edge index of each KC group (only KCs with input, ascending)
+        grouped = np.flatnonzero(np.diff(post_sorted, prepend=-1))
+        self.kc_group_start = grouped.astype(np.int64)
+        self.kc_group_kc = np.unique(post_sorted)  # KC id per group, ascending
+        self.kc_group_id = np.full(self.n_kc, -1, dtype=np.int64)
+        self.kc_group_id[np.unique(post_sorted)] = np.arange(len(grouped))
         self.kc_bias = np.where(self.kc_has_input, 0.0, -1e9).astype(np.float32)
 
         # real MBON grouping
@@ -78,7 +88,7 @@ class RealMB:
         self.bin_width = cfg.bin_width
         self.n_sensory = 5 * cfg.num_bins
         centers = np.linspace(-1.0, 1.0, cfg.num_bins, dtype=np.float32)
-        self.bin_centers = np.tile(centers, 5)
+        self.bin_centers = centers
 
         # plastic weights start at the real connectivity, optionally scaled by
         # synapse counts (normalized in calibrate)
@@ -120,10 +130,9 @@ class RealMB:
     def encode(self, obs: np.ndarray) -> np.ndarray:
         """Raw observations (N, 5) -> antennal-lobe code (N, 5*num_bins):
         triangular tuning per feature, like the abstract brain's PNs."""
-        x = obs[:, None, :5]  # (N, 1, F)
-        d = np.abs(x - self.bin_centers.reshape(1, -1, 5))
-        r = np.maximum(1.0 - d / self.bin_width, 0.0)
-        return r.max(axis=2).reshape(obs.shape[0], self.n_sensory).astype(np.float32)
+        d = np.abs(obs[:, None, :5] - self.bin_centers[None, :, None])  # (N, B, F)
+        r = np.maximum(1.0 - d / self.bin_width, 0.0)                   # (N, B, F)
+        return r.transpose(0, 2, 1).reshape(obs.shape[0], self.n_sensory).astype(np.float32)
 
     def _pn_pre(self, features: np.ndarray, codes: np.ndarray) -> np.ndarray:
         x = (features - self.feat_mean) / self.feat_scale
@@ -132,9 +141,26 @@ class RealMB:
     def _pn(self, features: np.ndarray, codes: np.ndarray) -> np.ndarray:
         return np.maximum(self._pn_pre(features, codes) - self.pn_theta, 0.0) * self.pn_scale
 
+    def _kc_input(self, pn_act: np.ndarray) -> np.ndarray:
+        """(B, n_pn) -> (B, n_kc) coincidence drive: min over each KC's real
+        PN inputs (soft-AND); KCs without input get -1e9.
+
+        Chunked over batch rows: reduceat over all 22.6k edges at once for
+        4096 calibration rows would need ~400 MB of scratch."""
+        b = pn_act.shape[0]
+        out = np.empty((b, self.n_kc), dtype=np.float32)
+        row_slice = 256
+        for lo in range(0, b, row_slice):
+            hi = min(b, lo + row_slice)
+            edge_vals = pn_act[lo:hi, self.edge_pre]  # (rows, n_edges)
+            mins = np.minimum.reduceat(edge_vals, self.kc_group_start, axis=1)
+            out[lo:hi, self.kc_group_kc] = mins
+        out[:, ~self.kc_has_input] = -1e9
+        return out + self.kc_bias
+
     def kc_code(self, features: np.ndarray, codes: np.ndarray) -> np.ndarray:
         """(B, F) features + (B, A_dims) action codes -> (B, n_kc) bool top-k code."""
-        h = self._pn(features, codes) @ self.pn_kc + self.kc_bias
+        h = self._kc_input(self._pn(features, codes))
         k = min(self.cfg.kc_active, h.shape[1])
         idx = np.argpartition(h, -k, axis=1)[:, -k:]
         kc = np.zeros(h.shape, dtype=bool)
@@ -207,7 +233,7 @@ class RealMB:
             inter = (kc[:, 0] & kc[:, 1]).sum(axis=1).astype(np.float32)
             return float((inter / cfg.kc_active).mean())
 
-        lo, hi = 0.0, 64.0
+        lo, hi = 0.0, 1024.0
         for _ in range(17):
             mid = 0.5 * (lo + hi)
             set_pn(mid)

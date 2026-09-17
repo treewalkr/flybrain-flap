@@ -107,6 +107,113 @@ def population_activity(brain, obs, rpe) -> dict[str, np.ndarray]:
     return {"pn": pn, "kc": kc, "mbon": mbon, "dan": dan}
 
 
+def build_scene(cloud: SkeletonCloud, stride: int = 1, off_screen: bool = True,
+                window_size=(1280, 800)):
+    """One pyvista plotter with the shell + all skeletons as a colourable mesh."""
+    import pyvista as pv
+
+    shell = pv.read(PLY_DIR / "JRCFIB2022M_brain.ply")
+    shell.points = shell.points / 1000.0  # shell is in nm, skeletons in um
+    brain_center = np.array(shell.center, dtype=np.float64)
+
+    plotter = pv.Plotter(off_screen=off_screen, window_size=window_size)
+    plotter.set_background((0.015, 0.016, 0.025))
+    plotter.add_mesh(shell, color=(0.30, 0.38, 0.60), opacity=0.12)
+
+    # lines through consecutive skeleton samples, grouped per neuron
+    order = np.lexsort((cloud.population, cloud.neuron))
+    keep = order[::stride]  # subsample long skeletons for speed
+    pts_sorted = cloud.points[keep]
+    neuron_sorted = cloud.neuron[keep]
+    lines = []
+    start = 0
+    for i in range(1, len(neuron_sorted) + 1):
+        if i == len(neuron_sorted) or neuron_sorted[i] != neuron_sorted[start]:
+            if i - start > 1:
+                lines.append(np.hstack([[i - start], np.arange(start, i)]))
+            start = i
+    poly = pv.PolyData(pts_sorted)
+    poly.lines = np.concatenate(lines)
+    poly.point_data["act"] = activity_color(np.zeros(cloud.n_neurons)[cloud.neuron])
+    plotter.add_mesh(poly, scalars="act", rgb=True, line_width=2.0)
+
+    plotter.camera_position = 'iso'
+    plotter.camera.focal_point = tuple(brain_center)
+    plotter.camera.position = tuple(brain_center + np.array([-500, -300, -400]))
+    plotter.camera.up = (0, -1, 0)
+    plotter.camera.clipping_range = (1, 5000)
+    return plotter, poly
+
+
+def update_colors(poly, cloud: SkeletonCloud, act_vec: np.ndarray):
+    poly.point_data["act"] = activity_color(act_vec[cloud.neuron])
+
+
+def run_live(args) -> None:
+    """Real-time: pygame game window + interactive 3D brain window, one loop."""
+    import pygame
+
+    from .game import GameView
+    from .realbrain import RealMB, RealMBConfig
+
+    circuit = load_circuit()
+    brain = RealMB(circuit, RealMBConfig(seed=0, alpha=args.alpha))
+    brain.load(args.weights)
+
+    cloud = SkeletonCloud(circuit)
+    print(f"subsampling skeletons 1/{args.stride} for interactive speed")
+    cloud.points = cloud.points[::args.stride]
+    cloud.neuron = cloud.neuron[::args.stride]
+    cloud.population = cloud.population[::args.stride]
+
+    plotter, poly = build_scene(cloud, stride=1, off_screen=False)
+    plotter.show(interactive_update=True, auto_close=False)
+
+    view = GameView(seed=args.seed)
+    obs = view.env.reset()
+    prev_q = float(brain.values(obs)[0].max())
+    clock = view.clock
+    speed = 1
+    running = True
+    while running:
+        for event in view.pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    speed = min(speed * 2, 8)
+                elif event.key == pygame.K_r:
+                    obs = view.env.reset()
+                    prev_q = 0.0
+
+        done = False
+        rpe = None
+        for _ in range(speed):
+            a, q, _ = brain.act(obs, 0.0)
+            nobs, r, done = view.env.step(a)
+            qn = float(brain.values(nobs)[0].max()) if not done else 0.0
+            rpe = float(r[0]) + brain.cfg.gamma * qn - prev_q
+            prev_q = qn
+            obs = nobs
+            if done:
+                obs = view.env.reset()
+                prev_q = 0.0
+        view.draw(flash_flap=bool(a[0] == 1))
+
+        acts = population_activity(brain, obs, rpe if rpe is not None else 0.0)
+        act_vec = np.zeros(cloud.n_neurons, dtype=np.float32)
+        for pop, v in acts.items():
+            act_vec[cloud.offsets[pop]:cloud.offsets[pop] + cloud.counts[pop]] = v
+        update_colors(poly, cloud, act_vec)
+        plotter.render()
+        clock.tick(60)
+
+    plotter.close()
+    view.pygame.quit()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--weights", type=str, required=True)
@@ -116,7 +223,15 @@ def main() -> None:
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--alpha", type=float, default=0.05)
+    ap.add_argument("--live", action="store_true",
+                    help="real-time interactive window instead of MP4")
+    ap.add_argument("--stride", type=int, default=4,
+                    help="skeleton point subsampling in --live mode")
     args = ap.parse_args()
+
+    if args.live:
+        run_live(args)
+        return
 
     import pyvista as pv
     pv.OFF_SCREEN = True
@@ -128,45 +243,9 @@ def main() -> None:
     brain.load(args.weights)
 
     cloud = SkeletonCloud(circuit)
-    shell = pv.read(PLY_DIR / "JRCFIB2022M_brain.ply")
-    shell.points = shell.points / 1000.0  # shell is in nm, skeletons in um
-    brain_center = np.array(shell.center, dtype=np.float64)
+    brain_center = None
 
-    # skeletons and shell are now both in MaleCNS micrometre space
-    points = cloud.points
-    center = points.mean(axis=0)
-    print(f"skeleton centroid: {center.round(1)} (shell center {brain_center.round(1)})")
-
-    plotter = pv.Plotter(off_screen=True, window_size=(1280, 800))
-    plotter.set_background((0.015, 0.016, 0.025))
-    plotter.add_mesh(shell, color=(0.30, 0.38, 0.60), opacity=0.12)
-
-    # lines through consecutive skeleton samples, grouped per neuron
-    lines = []
-    order = np.lexsort((cloud.population, cloud.neuron))
-    pts_sorted = points[order]
-    neuron_sorted = cloud.neuron[order]
-    start = 0
-    for i in range(1, len(neuron_sorted) + 1):
-        if i == len(neuron_sorted) or neuron_sorted[i] != neuron_sorted[start]:
-            n = i - start
-            if n > 1:
-                lines.append(np.hstack([[n], np.arange(start, i)]))
-            start = i
-    lines = np.concatenate(lines)
-    poly = pv.PolyData(pts_sorted)
-    poly.lines = lines
-    rgb = activity_color(np.zeros(cloud.n_neurons)[cloud.neuron])
-    poly.point_data["act"] = rgb
-    plotter.add_mesh(poly, scalars="act", rgb=True, line_width=1.5,
-                     render_lines_as_tubes=False)
-
-    plotter.camera_position = 'iso'
-    plotter.camera.focal_point = tuple(brain_center)
-    dist = 700.0
-    plotter.camera.position = tuple(brain_center + np.array([-500, -300, -400]) * dist / 700)
-    plotter.camera.up = (0, -1, 0)
-    plotter.camera.clipping_range = (1, 5000)
+    plotter, poly = build_scene(cloud)
 
     plotter.open_movie(args.out, framerate=args.fps)
     orbit_deg = 45.0
