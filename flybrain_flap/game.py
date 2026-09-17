@@ -247,13 +247,26 @@ def main():
     p.add_argument("--tps", type=int, default=60,
                    help="env ticks per second in human mode")
     p.add_argument("--brain-view", action="store_true",
-                   help="live mushroom-body panel next to the game")
+                   help="live mushroom-body panel next to the game "
+                        "(abstract brain only)")
+    p.add_argument("--circuit", type=str, default=None,
+                   help="circuit.npz: watch the real MaleCNS-connectome "
+                        "brain instead of the abstract one")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
 
     view = GameView(seed=args.seed, brain_view=args.brain_view)
     if args.human:
         view.run(brain=None, tps=args.tps)
+    elif args.brain and args.circuit:
+        from .connectome import load as load_circuit
+        from .realbrain import RealMB, RealMBConfig
+
+        brain = RealMB(load_circuit(args.circuit), RealMBConfig(seed=0))
+        brain.load(args.brain)
+        view.run(brain=brain, speed=args.speed)
+    elif args.circuit:
+        p.error("--circuit needs --brain WEIGHTS (the trained KC->MBON weights)")
     elif args.brain:
         brain = load_brain(args.brain, view.env.obs().shape[1])
         if args.brain_view:
