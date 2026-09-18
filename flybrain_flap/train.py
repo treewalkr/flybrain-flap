@@ -43,6 +43,12 @@ def parse_args():
                    help="RealMB only: target dV per unit RPE")
     p.add_argument("--overlap", type=float, default=0.5,
                    help="RealMB only: target KC-code overlap between actions")
+    p.add_argument("--pn-quantile", type=float, default=0.5,
+                   help="RealMB only: PN activation threshold quantile "
+                        "(lower = denser PN field = more KC candidates)")
+    p.add_argument("--pn-action-fraction", type=float, default=0.5,
+                   help="RealMB only: fraction of PNs that also read an action "
+                        "code (higher = more per-action KC gating)")
     return p.parse_args()
 
 
@@ -58,7 +64,9 @@ def main():
 
         cfg = RealMBConfig(gamma=args.gamma, alpha=args.alpha, seed=args.seed,
                            target_action_overlap=args.overlap,
-                           trace_lambda=args.trace_lambda)
+                           trace_lambda=args.trace_lambda,
+                           pn_quantile=args.pn_quantile,
+                           pn_action_fraction=args.pn_action_fraction)
         brain = RealMB(load_circuit(args.circuit), cfg)
         info = calibrate_from_env(brain, env)
         print("calibration:", {k: round(v, 4) if isinstance(v, float) else v
